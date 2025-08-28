@@ -1,136 +1,99 @@
 # interface.py
-# Streamlit interface for Spanner AI with FAISS RAG + Gemini (no async/grpc)
 
 import os
-import time
-import requests
+import json
 import streamlit as st
+from supabase import create_client, Client
+from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
-from langchain_community.vectorstores import FAISS
 import google.generativeai as genai
 
-# ---------------- Setup ----------------
+# ----------------- Setup -----------------
 load_dotenv()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ Missing Supabase credentials in .env file")
+
 if not GOOGLE_API_KEY:
-    st.error("❌ GOOGLE_API_KEY not found. Put it in your .env file.")
-    st.stop()
+    raise ValueError("❌ Missing Google Gemini API key in .env file")
 
-# Configure the official Google Generative AI SDK (HTTP only, no event loop)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Configure Google Gemini client
 genai.configure(api_key=GOOGLE_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")  # Adjust model name if needed
 
-# Load FAISS index (built previously via chunker.py)
-INDEX_PATH = "toyota_manual_index"  # <— ensure this folder exists beside interface.py
-try:
-    # We load without an embedding function because we'll embed queries ourselves
-    db = FAISS.load_local(INDEX_PATH, embeddings=None, allow_dangerous_deserialization=True)
-except Exception as e:
-    st.error(f"❌ Failed to load FAISS index at '{INDEX_PATH}'.\n{e}")
-    st.stop()
+# Use the same embedding model as your uploader (768-dim)
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
 
-# ---------------- Helpers ----------------
-def embed_query(text: str) -> list[float]:
-    """Return embedding vector for a query using Gemini embeddings API."""
-    # task_type="retrieval_query" is recommended for queries
-    res = genai.embed_content(
-        model="models/embedding-001",
-        content=text,
-        task_type="retrieval_query",
-    )
-    return res["embedding"]
+# ----------------- RAG + Synthesis Function -----------------
+def query_rag(user_input: str, k: int = 3) -> str:
+    """
+    Query Supabase for similar chunks and synthesize natural language response using Google Gemini.
+    """
+    # Embed user query with 768-dim model
+    query_vector = embeddings.embed_query(user_input)
 
-def answer_with_gemini(context: str, question: str) -> str:
-    """Call Gemini text model via REST to generate a concise, friendly answer."""
+    # Call Supabase RPC for similarity search (expects: query_embedding, match_count)
+    response = supabase.rpc(
+        "match_manual_chunks",
+        {
+            "query_embedding": query_vector,
+            "match_count": k,
+        },
+    ).execute()
+
+    matches = response.data
+    if not matches:
+        return "Sorry, I couldn’t find anything in the manual. Can you rephrase?"
+
+    # Build context from retrieved docs
+    context = "\n\n".join([f"({m['manual_name']}) {m['content']}" for m in matches])
+
+    # Construct prompt for Gemini
     prompt = f"""
-You are Spanner AI, a concise and friendly automotive assistant.
-Use the provided manual excerpts when applicable. If they are insufficient,
-use your general automotive knowledge. Keep answers short, clear, and human.
+You are Spanner AI, a helpful and concise car manual assistant.
+Use the following context from car manuals to answer the question:
 
-Context:
 {context}
 
-Question:
-{question}
+Question: {user_input}
 
-Answer:
-"""
+Answer:"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GOOGLE_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 500},
-    }
-    r = requests.post(url, json=payload, timeout=60)
-    if not r.ok:
-        return f"⚠️ Gemini API error: {r.text}"
-    data = r.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        return "⚠️ Sorry, I couldn't generate a response."
+    # Call Google Gemini to generate answer
+    gemini_response = gemini_model.generate_content(prompt)
+    
+    return gemini_response.text.strip()
 
-def query_rag(user_input: str, k: int = 3):
-    """Embed the query, search FAISS by vector, and ask Gemini with context."""
-    try:
-        qvec = embed_query(user_input)
-    except Exception as e:
-        return f"⚠️ Embedding error: {e}", []
-
-    # Use FAISS by-vector search (no embedding function needed on the store)
-    try:
-        docs = db.similarity_search_by_vector(qvec, k=k)
-    except Exception as e:
-        return f"⚠️ FAISS search error: {e}", []
-
-    context = "\n\n".join([d.page_content for d in docs]) if docs else ""
-    answer = answer_with_gemini(context, user_input)
-    return answer, docs
-
-# ---------------- Streamlit UI ----------------
+# ----------------- Streamlit UI -----------------
 st.title("🚗 Spanner AI - Car Manual Assistant")
-st.caption("Ask car or motorcycle questions. I’ll search your manual and answer concisely.")
+st.caption("Ask me car-related questions. I’ll search the manual and help you out!")
 
-# Chat history
+# Initialize chat history
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hello! How may I help you today?"}]
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hello! How may I help you today?"}
+    ]
 
-# Render history
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+# Display past messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# Input
-if prompt := st.chat_input("Describe the issue and include your make/model..."):
-    # Show user msg
+# Handle new input
+if prompt := st.chat_input("Describe your problem..."):
+    # User message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-
-    # Generate assistant reply
+    # Assistant response
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        placeholder.markdown("Thinking… ▌")
-
-        answer, docs = query_rag(prompt)
-
-        # Simulate a tiny typing effect (optional)
-        typed = ""
-        for word in answer.split():
-            typed += word + " "
-            time.sleep(0.01)
-            placeholder.markdown(typed + "▌")
-        placeholder.markdown(typed.strip())
-
-        # Optional: show sources (first 120 chars of each)
-        if docs:
-            with st.expander("📚 Sources (top matches)"):
-                for i, d in enumerate(docs, 1):
-                    src = d.metadata.get("source", "manual")
-                    pg = d.metadata.get("page", None)
-                    head = (d.page_content or "").strip().replace("\n", " ")
-                    snippet = head[:160] + ("…" if len(head) > 160 else "")
-                    st.markdown(f"**{i}.** {src}{f' (p.{pg})' if pg is not None else ''}\n\n> {snippet}")
-
-    # Save assistant reply
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        response = query_rag(prompt)
+        st.markdown(response)
+    st.session_state.messages.append({"role": "assistant", "content": response
+    })
