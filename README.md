@@ -1,7 +1,7 @@
 # Spanner-AI-Python-version
 ### A python variant of my Spanner AI diagnostic tool project
 
-- Uses HuggingFace model to create 786-dimension vector embeddings using local resources
+- Uses HuggingFace model to create 768-dimension vector embeddings using local resources
 - Then pushes those embeddings to Supabase
 - The frontend then queries Supabase and fetches said embeddings
 - The embeddings are used to generate a RAG-response
