@@ -6,3 +6,6 @@
 - The frontend then queries Supabase and fetches said embeddings
 - The embeddings are used to generate a RAG-response
 - Uses *Google Gemini 2.5 Flash* to generate human-like response for the user
+
+
+to run locally, execute 'python -m streamlit run interface.py' in the command prompt for the local folder
