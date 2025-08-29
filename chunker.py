@@ -1,38 +1,64 @@
-# code to create chunks + embeddings and saves FAISS index
+# chunker.py
+# Create chunks + embeddings for multiple manuals and save FAISS indexes
+# Now with fallback loader for encrypted/problematic PDFs
 
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
-# Load environment variables from .env file
+# ----------------- Setup -----------------
 load_dotenv()
 
-# Set your Google Gemini API key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("Please set GOOGLE_API_KEY in your .env file")
+DATA_DIR = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\manuals"      # Folder containing all manuals (PDFs)
+OUTPUT_DIR = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\FAISS Indexes" # Folder to save FAISS indexes
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 1. Load PDF
-pdf_path = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\toyota_manual.pdf"  # Must be in the same folder
-loader = PyPDFLoader(pdf_path)
-documents = loader.load()
+# Use HuggingFace 768-dim model (consistent with uploader + interface)
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
 
-# 2. Split into chunks
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=500)
-chunks = splitter.split_documents(documents)
+# Chunking strategy
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,       # ~500 words
+    chunk_overlap=100,    # context overlap
+    separators=["\n\n", "\n", ". ", " ", ""]
+)
 
-print(f"✅ Loaded {len(chunks)} chunks from the manual.")
+# ----------------- Process Manuals -----------------
+for file in os.listdir(DATA_DIR):
+    if not file.endswith(".pdf"):
+        continue
 
-# 3. Create embeddings
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+    manual_name = os.path.splitext(file)[0]  # e.g. "Toyota_Corolla_2020"
+    pdf_path = os.path.join(DATA_DIR, file)
 
-# 4. Store in FAISS
-vectorstore = FAISS.from_documents(chunks, embeddings)
+    print(f"\n📖 Processing manual: {manual_name}")
 
-# 5. Save the vectorstore locally
-vectorstore.save_local("toyota_manual_index")
+    # 1. Load PDF (try PyPDF first, then fallback to PDFPlumber)
+    try:
+        loader = PyPDFLoader(pdf_path)
+        documents = loader.load()
+    except Exception as e:
+        print(f"⚠️ PyPDFLoader failed for {manual_name} ({e}), trying PDFPlumberLoader...")
+        try:
+            loader = PDFPlumberLoader(pdf_path)
+            documents = loader.load()
+        except Exception as e2:
+            print(f"❌ Failed to load {manual_name} with both loaders ({e2}). Skipping.")
+            continue
 
-print("✅ Embeddings created and stored in 'toyota_manual_index'")
+    # 2. Split into chunks
+    chunks = splitter.split_documents(documents)
+    print(f"✅ Split into {len(chunks)} chunks.")
+
+    # 3. Create FAISS index
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+
+    # 4. Save FAISS index
+    out_path = os.path.join(OUTPUT_DIR, f"{manual_name}_index")
+    vectorstore.save_local(out_path)
+    print(f"✅ Saved FAISS index to {out_path}")
+
+print("\n🎉 All manuals processed and FAISS indexes saved.")

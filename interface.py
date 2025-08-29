@@ -1,5 +1,3 @@
-# interface.py
-
 import os
 import json
 import streamlit as st
@@ -7,6 +5,8 @@ from supabase import create_client, Client
 from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 import google.generativeai as genai
+from rapidfuzz import fuzz, process
+
 
 # ----------------- Setup -----------------
 load_dotenv()
@@ -25,36 +25,69 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Configure Google Gemini client
 genai.configure(api_key=GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.5-flash")  # Adjust model name if needed
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
-# Use the same embedding model as your uploader (768-dim)
+# Use HuggingFace embeddings (768-dim)
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
 
+
+# ----------------- Utility: Manual Detection -----------------
+def normalize_name(name: str) -> str:
+    """Normalize car names by stripping brand and punctuation."""
+    name = name.lower()
+    for brand in ["toyota", "honda", "yamaha", "mazda"]:
+        name = name.replace(brand, "")
+    return "".join(ch for ch in name if ch.isalnum() or ch.isspace()).strip()
+
+def detect_manual(user_input: str) -> tuple[str | None, int]:
+    """
+    Detect if the user mentions a known manual (by fuzzy matching).
+    Returns (manual_name, score).
+    """
+    manuals_resp = supabase.table("manual_chunks").select("manual_name").execute()
+    all_manuals = [m["manual_name"] for m in manuals_resp.data]
+
+    if not all_manuals:
+        return None, 0
+
+    query_norm = normalize_name(user_input)
+
+    # Build forward + reverse lookup maps
+    manual_norms = {manual: normalize_name(manual) for manual in all_manuals}
+    reverse_map = {v: k for k, v in manual_norms.items()}  # norm → original
+
+    # Run fuzzy match on normalized names
+    result = process.extractOne(query_norm, list(manual_norms.values()), scorer=fuzz.token_sort_ratio)
+
+    if result:
+        best_match, score, _ = result  # RapidFuzz v3 returns (match, score, index)
+        original_manual = reverse_map.get(best_match)
+        if original_manual:
+            return original_manual, score
+
+    return None, 0
+
+
 # ----------------- RAG + Synthesis Function -----------------
-def query_rag(user_input: str, k: int = 3) -> str:
-    """
-    Query Supabase for similar chunks and synthesize natural language response using Google Gemini.
-    """
-    # Embed user query with 768-dim model
+def query_rag(user_input: str, k: int = 3, manual_name: str = None) -> str:
+    # Handle simple greetings / non-questions
+    if len(user_input.strip().split()) < 2:
+        return "👋 Hello! How can I help you with your car manual today?"
+
     query_vector = embeddings.embed_query(user_input)
 
-    # Call Supabase RPC for similarity search (expects: query_embedding, match_count)
-    response = supabase.rpc(
-        "match_manual_chunks",
-        {
-            "query_embedding": query_vector,
-            "match_count": k,
-        },
-    ).execute()
+    rpc_params = {"query_embedding": query_vector, "match_count": k}
+    if manual_name:
+        rpc_params["manual_filter"] = manual_name
 
+    response = supabase.rpc("match_manual_chunks", rpc_params).execute()
     matches = response.data
-    if not matches:
-        return "Sorry, I couldn’t find anything in the manual. Can you rephrase?"
 
-    # Build context from retrieved docs
+    if not matches:
+        return "Sorry, I couldn’t find anything in the manuals. Can you rephrase?"
+
     context = "\n\n".join([f"({m['manual_name']}) {m['content']}" for m in matches])
 
-    # Construct prompt for Gemini
     prompt = f"""
 You are Spanner AI, a helpful and concise car manual assistant.
 Use the following context from car manuals to answer the question:
@@ -65,35 +98,48 @@ Question: {user_input}
 
 Answer:"""
 
-    # Call Google Gemini to generate answer
     gemini_response = gemini_model.generate_content(prompt)
-    
     return gemini_response.text.strip()
 
-# ----------------- Streamlit UI -----------------
-st.title("🚗 Spanner AI - Car Manual Assistant")
-st.caption("Ask me car-related questions. I’ll search the manual and help you out!")
 
-# Initialize chat history
+# ----------------- Streamlit UI -----------------
+st.title("🔧 Spanner AI - Your Car Manual Assistant")
+st.caption("Ask me any car-related questions and mention the make & model. I’ll search the manual to help you out!")
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hello! How may I help you today?"}
     ]
 
-# Display past messages
+# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle new input
+# Handle user input
 if prompt := st.chat_input("Describe your problem..."):
-    # User message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    # Assistant response
+
+    manual_name = None
+    if len(prompt.strip().split()) >= 2:  # skip greetings
+        detected_manual, score = detect_manual(prompt)
+
+        if detected_manual and score >= 80:
+            manual_name = detected_manual
+            st.info(f"🔎 Searching in **{manual_name}** manual (confidence {score}%)")
+
+        elif detected_manual and 60 <= score < 80:
+            st.warning(f"❓ Did you mean **{detected_manual}**? (confidence {score}%)")
+            # keep manual_name = None so we still search all manuals
+
+        else:
+            st.info("🔎 No specific manual detected — searching across all available manuals")
+
+    # Get assistant response
     with st.chat_message("assistant"):
-        response = query_rag(prompt)
+        response = query_rag(prompt, manual_name=manual_name)
         st.markdown(response)
-    st.session_state.messages.append({"role": "assistant", "content": response
-    })
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
