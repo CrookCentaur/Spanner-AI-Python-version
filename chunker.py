@@ -12,8 +12,8 @@ from langchain_community.vectorstores import FAISS
 # ----------------- Setup -----------------
 load_dotenv()
 
-DATA_DIR = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\manuals"      # Folder containing all manuals (PDFs)
-OUTPUT_DIR = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\FAISS Indexes" # Folder to save FAISS indexes
+DATA_DIR = "Path_to_manuals"      # Folder containing all manuals (PDFs)
+OUTPUT_DIR = "Path_to_FAISS Indexes" # Folder to save FAISS indexes
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Use HuggingFace 768-dim model (consistent with uploader + interface)
@@ -62,3 +62,4 @@ for file in os.listdir(DATA_DIR):
     print(f"✅ Saved FAISS index to {out_path}")
 
 print("\n🎉 All manuals processed and FAISS indexes saved.")
+
