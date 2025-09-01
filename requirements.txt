@@ -1,5 +1,8 @@
+streamlit
+supabase
+postgrest
 langchain
-openai
-faiss-cpu
-pypdf
+langchain-community
+langchain-huggingface
+sentence-transformers
 python-dotenv
