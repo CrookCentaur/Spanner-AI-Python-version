@@ -26,7 +26,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
 
 # Folder where chunker.py saved all FAISS indexes
-INDEX_DIR = "C:\\Users\\soham\\OneDrive\\Desktop\\Spanner AI\\code\\car-manual-rag\\data\\FAISS Indexes"
+INDEX_DIR = "path_to_FAISS Indexes"
 
 # ----------------- Upload Process -----------------
 BATCH_SIZE = 50  # upload 50 rows per request
@@ -73,3 +73,4 @@ for index_folder in os.listdir(INDEX_DIR):
     print(f"✅ Uploaded chunks for {manual_name} into Supabase")
 
 print("\n🎉 All FAISS indexes uploaded to Supabase.")
+
